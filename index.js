@@ -102,10 +102,9 @@ const PREFIX = "MEYYHUB";
 const CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 const KEY_TYPES = {
-    "PRM12": { label: "Premium 12 tháng", days: 365 },
-    "PRM06": { label: "Premium 6 tháng", days: 180 },
-    "PRM01": { label: "Premium 1 tháng", days: 30 },
-    "LIFET": { label: "Lifetime", days: 99999 },
+    "WEEK1": { label: "1 tuần", days: 7, maxKeys: 10 },
+    "PRM01": { label: "Premium 1 tháng", days: 30, maxKeys: 10 },
+    "LIFET": { label: "Lifetime", days: 99999, maxKeys: 5 },
 };
 
 function randStr(n) {
@@ -122,21 +121,8 @@ function makeSign(typeCode, date, rand, uid) {
 
 function generateKey(typeCode, uid) {
     if (!KEY_TYPES[typeCode]) throw new Error(`Invalid type code: ${typeCode}`);
-    const days = KEY_TYPES[typeCode].days;
-
-    // UID: 5 ký tự in hoa, pad bằng "0" nếu thiếu
-    uid = (uid || randStr(5)).toUpperCase().padEnd(5, "0").slice(0, 5);
-
-    // Ngày hết hạn dạng YYMMDD
-    const exp = new Date(Date.now() + days * 86_400_000);
-    const yy = String(exp.getFullYear()).slice(2);
-    const mm = String(exp.getMonth() + 1).padStart(2, "0");
-    const dd = String(exp.getDate()).padStart(2, "0");
-    const dateStr = `${yy}${mm}${dd}`;
-
-    const rand = randStr(5);
-    const sign = makeSign(typeCode, dateStr, rand, uid);
-    return `${PREFIX}-${typeCode}-${dateStr}-${rand}-${uid}-${sign}`;
+    // Format mới: 14 ký tự random chữ hoa + số
+    return randStr(14);
 }
 
 function validateKey(key) {
@@ -483,10 +469,9 @@ const slashCommands = [
                 .setDescription("Loại key")
                 .setRequired(true)
                 .addChoices(
-                    { name: "Premium 12 tháng (PRM12)", value: "PRM12" },
-                    { name: "Premium 6 tháng  (PRM06)", value: "PRM06" },
-                    { name: "Premium 1 tháng  (PRM01)", value: "PRM01" },
-                    { name: "Lifetime         (LIFET)", value: "LIFET" },
+                    { name: "1 tuần         (WEEK1)", value: "WEEK1" },
+                    { name: "Premium 1 tháng (PRM01)", value: "PRM01" },
+                    { name: "Lifetime        (LIFET)", value: "LIFET" },
                 ),
         )
         .addIntegerOption((o) =>
