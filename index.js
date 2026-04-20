@@ -577,6 +577,41 @@ client.on("interactionCreate", async (interaction) => {
         if (interaction.isChatInputCommand()) {
             const commandName = interaction.commandName;
 
+            // Phân quyền lệnh:
+            // - Không có role: chỉ /redeem
+            // - Premium: /redeem + /resethwid
+            // - Owner: tất cả
+            const memberCheck = await interaction.guild.members.fetch(interaction.user.id);
+            const isOwner = memberCheck.roles.cache.some(r => r.name === "Owner");
+            const hasPremium = memberCheck.roles.cache.some(r => r.name === "Premium");
+
+            const ownerOnlyCommands = ["genkey", "whitelist", "blacklist", "stats", "addhwid", "removehwid", "setmaxhwid", "managekey", "reset-code"];
+            const premiumCommands = ["redeem", "resethwid", "managekey"];
+
+            if (ownerOnlyCommands.includes(commandName) && !isOwner) {
+                return interaction.editReply({
+                    content: "❌ Chỉ **Owner** mới dùng được lệnh này!"
+                });
+            }
+
+            if (!premiumCommands.includes(commandName) && !isOwner) {
+                return interaction.editReply({
+                    content: "❌ Chỉ **Owner** mới dùng được lệnh này!"
+                });
+            }
+
+            if (commandName === "resethwid" && !hasPremium && !isOwner) {
+                return interaction.editReply({
+                    content: "❌ Bạn cần role **Premium** để dùng lệnh này! Dùng `/redeem` trước."
+                });
+            }
+
+            if (commandName === "managekey" && !hasPremium && !isOwner) {
+                return interaction.editReply({
+                    content: "❌ Bạn cần role **Premium** để dùng lệnh này! Dùng `/redeem` trước."
+                });
+            }
+
             if (commandName === "stats") {
                 const totalKeys = await keysCollection.countDocuments();
                 const totalUsers = await usersCollection.countDocuments();
@@ -966,7 +1001,7 @@ client.on("interactionCreate", async (interaction) => {
                 try {
                     const guild = interaction.guild;
                     if (guild) {
-                        const role = guild.roles.cache.find((r) => r.name === "Pre Old");
+                        const role = guild.roles.cache.find((r) => r.name === "Premium");
                         if (role) {
                             const member = await guild.members.fetch(interaction.user.id);
                             await member.roles.add(role);
@@ -1121,7 +1156,7 @@ client.on("interactionCreate", async (interaction) => {
                 cooldownName = "2 hours";
             } else if (
                 member &&
-                member.roles.cache.some((r) => r.name === "Pre Old")
+                member.roles.cache.some((r) => r.name === "Premium")
             ) {
                 cooldownTime = 2.5 * 24 * 60 * 60 * 1000;
                 cooldownName = "2.5 days";
