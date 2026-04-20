@@ -98,11 +98,11 @@ async function setUser(userId, data) {
 }
 // ─── Key Generation (format: MEYYHUB-TYPE-YYMMDD-RAND5-UID5-SIGN6) ───────────
 const SECRET = "fc3bd0f753714bf725e0e0b842caf04cac513c3741b873b6faae94e49e02c369";
-const PREFIX = "MEYYHUB";
+const PREFIX = "AMETHYSTHUB";
 const CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 const KEY_TYPES = {
-    "WEEK1": { label: "1 tuần", days: 7, maxKeys: 10 },
+    "WEEK1": { label: "1 tuần", days: 7, maxKeys: 30 },
     "PRM01": { label: "Premium 1 tháng", days: 30, maxKeys: 10 },
     "LIFET": { label: "Lifetime", days: 99999, maxKeys: 5 },
 };
@@ -1714,7 +1714,7 @@ app.post('/api/keys/redeem', authenticate, async (req, res) => {
     try {
         const guild = client.guilds.cache.get(ALLOWED_GUILD_ID)
         if (guild) {
-            const role = guild.roles.cache.find(r => r.name === 'Pre Old')
+            const role = guild.roles.cache.find(r => r.name === 'Premium')
             if (role) {
                 const member = await guild.members.fetch(userId)
                 await member.roles.add(role)
