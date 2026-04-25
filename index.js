@@ -519,6 +519,27 @@ const slashCommands = [
         ),
 
     new SlashCommandBuilder()
+        .setName("genkey")
+        .setDescription("[Owner] Tạo key whitelist mới")
+        .addStringOption((o) =>
+            o.setName("type")
+                .setDescription("Loại key")
+                .setRequired(true)
+                .addChoices(
+                    { name: "1 tuần          (WEEK1)", value: "WEEK1" },
+                    { name: "Premium 1 tháng (PRM01)", value: "PRM01" },
+                    { name: "Lifetime        (LIFET)", value: "LIFET" },
+                ),
+        )
+        .addIntegerOption((o) =>
+            o.setName("amount")
+                .setDescription("Số lượng key (mặc định 1, tối đa 10)")
+                .setRequired(false)
+                .setMinValue(1)
+                .setMaxValue(10),
+        ),
+
+    new SlashCommandBuilder()
         .setName("setmaxhwid")
         .setDescription("[Owner] Change the max HWID limit of a key")
         .addStringOption((o) =>
