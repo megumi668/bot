@@ -183,14 +183,14 @@ client.on("messageCreate", async (message) => {
 
         const embed = new EmbedBuilder()
             .setColor("#5865F2")
-            .setTitle("🔐 **Meyy Hub Whitelist Panel**")
+            .setTitle("🔐 **Amethyst Hub Whitelist Panel**")
             .setDescription("Select an option from the dropdown menu below.")
             .setThumbnail(client.user?.displayAvatarURL?.() || null)
             .addFields({
                 name: "Function",
                 value: "Reset HWID / Redeem Key / Manager Key",
             })
-            .setFooter({ text: "Meyy Hub • Premium System" })
+            .setFooter({ text: "Amethyst Hub • Premium System" })
             .setTimestamp();
 
         const dropdown = new ActionRowBuilder().addComponents(
@@ -345,7 +345,7 @@ client.on("messageCreate", async (message) => {
                 { name: '📆 Redeem lúc', value: kd.redeemedAt ? `<t:${Math.floor(kd.redeemedAt / 1000)}:f>` : 'N/A', inline: true },
                 { name: `🖥️ HWID (${hwids.length}/${maxHwid})`, value: hwids.length > 0 ? hwids.map(h => `\`${h}\``).join('\n') : '*(chưa đăng ký)*', inline: false },
             )
-            .setFooter({ text: 'Meyy Hub • Key Inspector' })
+            .setFooter({ text: 'Amethyst Hub • Key Inspector' })
             .setTimestamp()
 
         return message.reply({ embeds: [embed] })
@@ -411,7 +411,7 @@ client.on("messageCreate", async (message) => {
             .setColor('#5865F2')
             .setTitle(`🗂️ Keys của ${targetTag.replace(/\*\*/g, '')}`)
             .setDescription(`Tổng cộng: **${total}** key(s) — ✅ Đã redeem: **${ownedKeys.length}** — ⏳ Chưa redeem: **${receivedKeys.length}**`)
-            .setFooter({ text: 'Meyy Hub • Key Inspector' })
+            .setFooter({ text: 'Amethyst Hub • Key Inspector' })
             .setTimestamp()
 
         // Thêm field cho từng chunk đã redeem
@@ -578,15 +578,15 @@ client.on("interactionCreate", async (interaction) => {
             const commandName = interaction.commandName;
 
             // Phân quyền lệnh:
-            // - Không có role: chỉ /redeem
-            // - Premium: /redeem + /resethwid
+            // - Ai cũng dùng được: /redeem
+            // - Premium: /redeem + /resethwid + /managekey
             // - Owner: tất cả
             const memberCheck = await interaction.guild.members.fetch(interaction.user.id);
             const isOwner = memberCheck.roles.cache.some(r => r.name === "Owner");
             const hasPremium = memberCheck.roles.cache.some(r => r.name === "Premium");
 
-            const ownerOnlyCommands = ["genkey", "whitelist", "blacklist", "stats", "addhwid", "removehwid", "setmaxhwid", "managekey", "reset-code"];
-            const premiumCommands = ["redeem", "resethwid", "managekey"];
+            const ownerOnlyCommands = ["genkey", "whitelist", "blacklist", "stats", "addhwid", "removehwid", "setmaxhwid", "reset-code"];
+            const premiumCommands = ["resethwid", "managekey"];
 
             if (ownerOnlyCommands.includes(commandName) && !isOwner) {
                 return interaction.editReply({
@@ -594,21 +594,9 @@ client.on("interactionCreate", async (interaction) => {
                 });
             }
 
-            if (!premiumCommands.includes(commandName) && !isOwner) {
+            if (premiumCommands.includes(commandName) && !hasPremium && !isOwner) {
                 return interaction.editReply({
-                    content: "❌ Chỉ **Owner** mới dùng được lệnh này!"
-                });
-            }
-
-            if (commandName === "resethwid" && !hasPremium && !isOwner) {
-                return interaction.editReply({
-                    content: "❌ Bạn cần role **Premium** để dùng lệnh này! Dùng `/redeem` trước."
-                });
-            }
-
-            if (commandName === "managekey" && !hasPremium && !isOwner) {
-                return interaction.editReply({
-                    content: "❌ Bạn cần role **Premium** để dùng lệnh này! Dùng `/redeem` trước."
+                    content: "❌ Bạn cần role **Premium** để dùng lệnh này! Dùng /redeem để kích hoạt key trước."
                 });
             }
 
@@ -777,7 +765,7 @@ client.on("interactionCreate", async (interaction) => {
                                 value: "Use `/redeem <key>` command to activate your key",
                             },
                         )
-                        .setFooter({ text: "Meyy Hub • Premium System" })
+                        .setFooter({ text: "Amethyst Hub • Premium System" })
                         .setTimestamp();
                     await dm.send({ embeds: [dmEmbed] });
                     await dm.send(
