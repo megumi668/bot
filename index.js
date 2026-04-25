@@ -532,13 +532,24 @@ const slashCommands = [
 async function registerSlashCommands() {
     try {
         const rest = new REST().setToken(DISCORD_TOKEN);
+
+        // Xóa global commands cũ (nếu có) để tránh conflict
+        await rest.put(
+            Routes.applicationCommands(client.user.id),
+            { body: [] }
+        );
+        console.log("🗑️ Cleared global slash commands");
+
+        // Register guild commands (cập nhật ngay lập tức)
         const result = await rest.put(
             Routes.applicationGuildCommands(client.user.id, ALLOWED_GUILD_ID),
             { body: slashCommands.map((c) => c.toJSON()) },
         );
-        console.log(`✅ Registered ${result.length} slash commands`);
+        console.log(`✅ Registered ${result.length} slash commands for guild ${ALLOWED_GUILD_ID}`);
+        result.forEach(cmd => console.log(`   - /${cmd.name}`));
     } catch (err) {
         console.error("❌ Slash commands registration failed:", err.message);
+        console.error(err);
     }
 }
 
