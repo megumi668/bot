@@ -1851,6 +1851,83 @@ async function start() {
         }, 5 * 60 * 1000);
 
         console.log("✅ Bot ready! Keep-alive active (1 min intervals)");
+
+        // ══ AUTO REVOKE PREMIUM ROLE KHI KEY HẾT HẠN ══
+        async function checkExpiredKeys() {
+            try {
+                const guild = client.guilds.cache.get(ALLOWED_GUILD_ID);
+                if (!guild) return;
+
+                const now = Date.now();
+                // Lấy tất cả key đã hết hạn và còn active
+                const expiredKeys = await keysCollection.find({
+                    active: true,
+                    expiresAt: { $ne: null, $lt: now }
+                }).toArray();
+
+                for (const keyData of expiredKeys) {
+                    // Đánh dấu key đã hết hạn
+                    await keysCollection.updateOne(
+                        { key: keyData.key },
+                        { $set: { active: false } }
+                    );
+
+                    // Tìm user đã redeem key này
+                    if (!keyData.redeemedBy) continue;
+                    const userId = keyData.redeemedBy;
+
+                    // Kiểm tra user còn key active nào không
+                    const stillActive = await keysCollection.findOne({
+                        redeemedBy: userId,
+                        active: true,
+                        $or: [
+                            { expiresAt: null },
+                            { expiresAt: { $gt: now } }
+                        ]
+                    });
+
+                    // Nếu không còn key active nào → thu hồi role Premium
+                    if (!stillActive) {
+                        try {
+                            const member = await guild.members.fetch(userId).catch(() => null);
+                            if (!member) continue;
+
+                            const premiumRole = guild.roles.cache.find(r => r.name === "Premium");
+                            if (!premiumRole) continue;
+
+                            if (member.roles.cache.has(premiumRole.id)) {
+                                await member.roles.remove(premiumRole);
+                                console.log(`🔴 Đã thu hồi role Premium của ${member.user.tag} (key hết hạn)`);
+
+                                // Gửi DM thông báo
+                                try {
+                                    const dm = await member.createDM();
+                                    await dm.send(
+                                        "⚠️ **Amethyst Hub** - Thông báo hết hạn\n\n" +
+                                        "Key của bạn đã hết hạn và role **Premium** đã bị thu hồi.\n" +
+                                        "Liên hệ admin để gia hạn!"
+                                    );
+                                } catch (e) {}
+                            }
+                        } catch (err) {
+                            console.error(`❌ Lỗi thu hồi role: ${err.message}`);
+                        }
+                    }
+                }
+
+                if (expiredKeys.length > 0) {
+                    console.log(`✅ Đã kiểm tra ${expiredKeys.length} key hết hạn`);
+                }
+            } catch (err) {
+                console.error("❌ checkExpiredKeys error:", err.message);
+            }
+        }
+
+        // Chạy ngay khi bot khởi động
+        checkExpiredKeys();
+        // Chạy mỗi 1 giờ
+        setInterval(checkExpiredKeys, 60 * 60 * 1000);
+
     });
 
     client.on("error", (err) => {
