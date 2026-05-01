@@ -102,9 +102,9 @@ const PREFIX = "AMETHYSTHUB";
 const CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 const KEY_TYPES = {
-    "WEEK1": { label: "1 tuần", days: 7, maxKeys: 30 },
+    "WEEK1": { label: "1 tuần", days: 7, maxKeys: 40 },
     "PRM01": { label: "Premium 1 tháng", days: 30, maxKeys: 10 },
-    "LIFET": { label: "Lifetime", days: 99999, maxKeys: 5 },
+    "LIFET": { label: "Lifetime", days: 99999, maxKeys: 15 },
 };
 
 function randStr(n) {
@@ -540,6 +540,15 @@ const slashCommands = [
         ),
 
     new SlashCommandBuilder()
+        .setName("checkuser")
+        .setDescription("[Owner] Xem trạng thái key của người dùng khác")
+        .addUserOption((o) =>
+            o.setName("user")
+                .setDescription("Người dùng cần kiểm tra")
+                .setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
         .setName("setmaxhwid")
         .setDescription("[Owner] Change the max HWID limit of a key")
         .addStringOption((o) =>
@@ -617,7 +626,7 @@ client.on("interactionCreate", async (interaction) => {
             const isOwner = memberCheck.roles.cache.some(r => r.name === "Owner");
             const hasPremium = memberCheck.roles.cache.some(r => r.name === "Premium");
 
-            const ownerOnlyCommands = ["genkey", "whitelist", "blacklist", "stats", "addhwid", "removehwid", "setmaxhwid", "reset-code"];
+            const ownerOnlyCommands = ["genkey", "whitelist", "blacklist", "stats", "addhwid", "removehwid", "setmaxhwid", "reset-code", "checkuser"];
             const premiumCommands = ["resethwid", "managekey"];
 
             if (ownerOnlyCommands.includes(commandName) && !isOwner) {
@@ -663,6 +672,56 @@ client.on("interactionCreate", async (interaction) => {
                     )
                     .setTimestamp();
                 return await interaction.editReply({ embeds: [embed] });
+            }
+
+            if (commandName === "checkuser") {
+                const member = await interaction.guild.members.fetch(interaction.user.id);
+                const isOwner = member.roles.cache.some(r => r.name === "Owner");
+                if (!isOwner) {
+                    return interaction.editReply({ content: "❌ Chỉ **Owner** mới dùng được lệnh này!" });
+                }
+
+                const targetUser = interaction.options.getUser("user");
+                const userData = await getUser(targetUser.id);
+
+                if (!userData || !userData.keys || userData.keys.length === 0) {
+                    return interaction.editReply({ content: `❌ **${targetUser.tag}** chưa redeem key nào!` });
+                }
+
+                const now = Date.now();
+                const fields = [];
+
+                for (const keyCode of userData.keys) {
+                    const keyData = await getKey(keyCode);
+                    if (!keyData) continue;
+
+                    const isExpired = keyData.expiresAt && keyData.expiresAt < now;
+                    const expireStr = keyData.expiresAt
+                        ? `<t:${Math.floor(keyData.expiresAt / 1000)}:F>`
+                        : "Lifetime ♾️";
+
+                    fields.push({
+                        name: `🔑 ${keyData.key}`,
+                        value: [
+                            `**Loại:** ${keyData.typeLabel || keyData.type}`,
+                            `**Trạng thái:** ${isExpired ? "❌ Hết hạn" : keyData.active ? "✅ Active" : "⛔ Disabled"}`,
+                            `**Hết hạn:** ${expireStr}`,
+                            `**HWID:** ${keyData.hwids ? keyData.hwids.length : 0}/${keyData.maxHwid || 1} máy`,
+                        ].join("
+"),
+                        inline: false
+                    });
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor("#9b59b6")
+                    .setTitle(`🔍 Key của ${targetUser.tag}`)
+                    .setThumbnail(targetUser.displayAvatarURL())
+                    .addFields(fields)
+                    .setFooter({ text: "Amethyst Hub • Premium System" })
+                    .setTimestamp();
+
+                return interaction.editReply({ embeds: [embed] });
             }
 
             if (commandName === "blacklist") {
