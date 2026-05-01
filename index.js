@@ -707,8 +707,7 @@ client.on("interactionCreate", async (interaction) => {
                             `**Trạng thái:** ${isExpired ? "❌ Hết hạn" : keyData.active ? "✅ Active" : "⛔ Disabled"}`,
                             `**Hết hạn:** ${expireStr}`,
                             `**HWID:** ${keyData.hwids ? keyData.hwids.length : 0}/${keyData.maxHwid || 1} máy`,
-                        ].join("
-"),
+                        ].join("\n"),
                         inline: false
                     });
                 }
