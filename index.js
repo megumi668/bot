@@ -1053,13 +1053,30 @@ client.on("interactionCreate", async (interaction) => {
                 const key = interaction.options.getString("key");
                 const keyData = await getKey(key);
                 if (!keyData)
-                    return interaction.editReply({ content: "❌ Invalid key" });
+                    return interaction.editReply({ content: "❌ Key không tồn tại!" });
                 if (!keyData.active)
-                    return interaction.editReply({ content: "❌ Key is blacklisted" });
+                    return interaction.editReply({ content: "❌ Key đã bị khóa!" });
                 if (keyData.userId)
-                    return interaction.editReply({ content: "❌ Key already redeemed" });
+                    return interaction.editReply({ content: "❌ Key này đã được người khác redeem rồi!" });
                 if (keyData.expiresAt && Date.now() > keyData.expiresAt)
-                    return interaction.editReply({ content: "❌ Key expired" });
+                    return interaction.editReply({ content: "❌ Key đã hết hạn!" });
+
+                // Kiểm tra người dùng đã có key active chưa
+                const existingUser = await getUser(interaction.user.id);
+                if (existingUser && existingUser.keys && existingUser.keys.length > 0) {
+                    const now = Date.now();
+                    for (const existingKey of existingUser.keys) {
+                        const existingKeyData = await getKey(existingKey);
+                        if (existingKeyData && existingKeyData.active) {
+                            const isExpired = existingKeyData.expiresAt && existingKeyData.expiresAt < now;
+                            if (!isExpired) {
+                                return interaction.editReply({
+                                    content: `❌ Bạn đã có key **${existingKey}** đang active rồi! Mỗi người chỉ được redeem **1 key** tại 1 thời điểm.`
+                                });
+                            }
+                        }
+                    }
+                }
 
                 await setKey(key, {
                     ...keyData,
