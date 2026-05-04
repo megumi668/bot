@@ -1948,16 +1948,19 @@ async function start() {
                     );
 
                     // Tìm user đã redeem key này
-                    if (!keyData.redeemedBy) continue;
-                    const userId = keyData.redeemedBy;
+                    // Key lưu userId (không phải redeemedBy)
+                    const userId = keyData.userId || keyData.redeemedBy;
+                    if (!userId) continue;
 
                     // Kiểm tra user còn key active nào không
                     const stillActive = await keysCollection.findOne({
-                        redeemedBy: userId,
+                        $or: [{ userId: userId }, { redeemedBy: userId }],
                         active: true,
-                        $or: [
-                            { expiresAt: null },
-                            { expiresAt: { $gt: now } }
+                        $and: [
+                            { $or: [
+                                { expiresAt: null },
+                                { expiresAt: { $gt: now } }
+                            ]}
                         ]
                     });
 
