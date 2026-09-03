@@ -584,6 +584,7 @@ async function registerSlashCommands() {
 }
 
 client.on("interactionCreate", async (interaction) => {
+    console.log(`📥 Nhận interaction: ${interaction.commandName || interaction.customId} lúc ${new Date().toISOString()}`);
     try {
         if (!interaction.guild || interaction.guild.id !== ALLOWED_GUILD_ID) {
             if (
