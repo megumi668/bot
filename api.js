@@ -86,6 +86,7 @@ app.post("/api/verify", async (req, res) => {
         await keysCollection.updateOne({ key }, { $set: { hwids, hwid: undefined } });
         return res.status(200).json({
             success: true,
+            session_key: MODULE_SESSION_KEY,
             message: `New device registered - Access granted (${hwids.length}/${maxHwid} slots used)`,
         });
     }
