@@ -77,6 +77,7 @@ app.post("/api/verify", async (req, res) => {
     if (hwids.includes(hwid)) {
         return res.status(200).json({
             success: true,
+            session_key: MODULE_SESSION_KEY,
             message: `HWID verified - Access granted (${hwids.length}/${maxHwid} slots used)`,
         });
     }
