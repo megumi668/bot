@@ -72,6 +72,7 @@ app.post("/api/verify", async (req, res) => {
 
     const hwids = normalizeHwids(keyData);
     const maxHwid = keyData.maxHwid ?? 1;
+    const MODULE_SESSION_KEY = "LyraSecureKey2026_GCM_PROTECT!9!";
 
     if (hwids.includes(hwid)) {
         return res.status(200).json({
