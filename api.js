@@ -8,10 +8,13 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// Key thật dùng để giải mã module phía client.
-// PHẢI đặt trong biến môi trường (.env / Render Environment), KHÔNG hardcode.
-// Đổi hẳn sang giá trị mới, khác với "LyraSecureKey2026_GCM_PROTECT!9!" cũ vì giá trị đó coi như đã lộ.
 const REAL_MODULE_KEY = process.env.MODULE_DECRYPT_KEY;
+
+// Secret dùng để KÝ RESPONSE (HMAC-SHA256). PHẢI đặt giống hệt trên cả bot Pikahost
+// và bot Render (cùng 1 giá trị) vì client chỉ verify bằng 1 secret duy nhất.
+// Tạo 1 lần bằng: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+// Đây là secret KHÁC với MODULE_DECRYPT_KEY và khác API_SECRET hiện có.
+const RESPONSE_SIGN_SECRET = process.env.RESPONSE_SIGN_SECRET;
 
 const SESSION_TTL_MS = 5 * 60 * 1000; // session key sống 5 phút
 
@@ -27,17 +30,18 @@ async function start() {
         console.error("❌ Missing MODULE_DECRYPT_KEY env var");
         process.exit(1);
     }
+    if (!RESPONSE_SIGN_SECRET) {
+        console.error("❌ Missing RESPONSE_SIGN_SECRET env var");
+        process.exit(1);
+    }
 
     try {
         const client = new MongoClient(MONGODB_URI);
         await client.connect();
 
-        // Cắm vào đúng DB và collection của bạn
         keysCollection = client.db("whitelist").collection("keys");
         sessionsCollection = client.db("whitelist").collection("sessions");
 
-        // TTL index: Mongo tự xoá document khi expiresAt tới hạn.
-        // Chỉ cần chạy 1 lần (nếu index đã tồn tại, lệnh này no-op).
         await sessionsCollection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
         console.log("✅ MongoDB connected successfully for Global API");
@@ -59,7 +63,7 @@ function normalizeHwids(keyData) {
 }
 
 function generateSessionKey() {
-    return crypto.randomBytes(32).toString('hex'); // 64 ký tự hex, ngẫu nhiên mỗi lần gọi
+    return crypto.randomBytes(32).toString('hex');
 }
 
 async function issueSession(key, hwid) {
@@ -78,38 +82,57 @@ async function issueSession(key, hwid) {
     return { sessionKey, expiresInSeconds: SESSION_TTL_MS / 1000 };
 }
 
-// Endpoint kiểm tra server còn sống hay không
+// ---- Ký response bằng HMAC-SHA256 ----
+// Bọc MỌI res.json(...) bằng hàm này, kể cả nhánh success:false, để kẻ tấn công
+// không thể phân biệt "nhánh nào cần giả" dựa trên có/không có chữ ký.
+function signPayload(payloadObj) {
+    const timestamp = Date.now();
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const canonical = JSON.stringify(payloadObj) + '|' + timestamp + '|' + nonce;
+
+    const signature = crypto
+        .createHmac('sha256', RESPONSE_SIGN_SECRET)
+        .update(canonical)
+        .digest('hex');
+
+    return { ...payloadObj, timestamp, nonce, signature };
+}
+
+function sendSigned(res, statusCode, payloadObj) {
+    return res.status(statusCode).json(signPayload(payloadObj));
+}
+
 app.get("/api/health", (req, res) => {
+    // Endpoint health-check không cần ký — không mang dữ liệu nhạy cảm, không ảnh hưởng license flow.
     res.json({ status: "OK", server: "Render-Global-API" });
 });
 
-// Endpoint xác thực License — trả về session_key TẠM THỜI, không trả module key thật nữa
 app.post("/api/verify", async (req, res) => {
     const { key, hwid } = req.body;
 
     if (!key || !hwid) {
-        return res.status(400).json({ success: false, message: "Key and HWID are required" });
+        return sendSigned(res, 400, { success: false, message: "Key and HWID are required" });
     }
 
     const keyData = await keysCollection.findOne({ key });
 
     if (!keyData) {
-        return res.status(200).json({ success: false, message: "Invalid key - Key does not exist" });
+        return sendSigned(res, 200, { success: false, message: "Invalid key - Key does not exist" });
     }
 
     if (!keyData.active) {
-        return res.status(200).json({
+        return sendSigned(res, 200, {
             success: false,
             message: "Key is blacklisted and cannot be used",
         });
     }
 
     if (keyData.expiresAt && Date.now() > keyData.expiresAt) {
-        return res.status(200).json({ success: false, message: "Key has expired" });
+        return sendSigned(res, 200, { success: false, message: "Key has expired" });
     }
 
     if (!keyData.userId) {
-        return res.status(200).json({
+        return sendSigned(res, 200, {
             success: false,
             message: "Key not redeemed yet - Please redeem key first using Discord bot",
         });
@@ -120,7 +143,7 @@ app.post("/api/verify", async (req, res) => {
 
     if (hwids.includes(hwid)) {
         const { sessionKey, expiresInSeconds } = await issueSession(key, hwid);
-        return res.status(200).json({
+        return sendSigned(res, 200, {
             success: true,
             session_key: sessionKey,
             expires_in: expiresInSeconds,
@@ -129,57 +152,65 @@ app.post("/api/verify", async (req, res) => {
     }
 
     if (hwids.length < maxHwid) {
-        hwids.push(hwid);
-        await keysCollection.updateOne({ key }, { $set: { hwids, hwid: undefined } });
+        // Atomic: điều kiện $expr đảm bảo không vượt maxHwid dù nhiều request đến cùng lúc.
+        const result = await keysCollection.findOneAndUpdate(
+            { key, $expr: { $lt: [{ $size: { $ifNull: ["$hwids", []] } }, maxHwid] } },
+            { $addToSet: { hwids: hwid }, $unset: { hwid: "" } },
+            { returnDocument: 'after' }
+        );
 
+        if (!result.value) {
+            return sendSigned(res, 200, {
+                success: false,
+                message: `Device limit reached (${maxHwid}/${maxHwid} slots full). Please reset HWID via Discord or contact Owner.`,
+            });
+        }
+
+        const newHwids = normalizeHwids(result.value);
         const { sessionKey, expiresInSeconds } = await issueSession(key, hwid);
-        return res.status(200).json({
+        return sendSigned(res, 200, {
             success: true,
             session_key: sessionKey,
             expires_in: expiresInSeconds,
-            message: `New device registered - Access granted (${hwids.length}/${maxHwid} slots used)`,
+            message: `New device registered - Access granted (${newHwids.length}/${maxHwid} slots used)`,
         });
     }
 
-    return res.status(200).json({
+    return sendSigned(res, 200, {
         success: false,
         message: `Device limit reached (${maxHwid}/${maxHwid} slots full). Please reset HWID via Discord or contact Owner.`,
     });
 });
 
-// Endpoint mới: đổi session_key (dùng 1 lần, hạn 5 phút) lấy module_key thật
 app.post("/api/module-key", async (req, res) => {
     const { session_key } = req.body;
 
     if (!session_key) {
-        return res.status(400).json({ success: false, message: "Missing session_key" });
+        return sendSigned(res, 400, { success: false, message: "Missing session_key" });
     }
 
     const session = await sessionsCollection.findOne({ sessionKey: session_key });
 
     if (!session) {
-        return res.status(200).json({ success: false, message: "Invalid or expired session" });
+        return sendSigned(res, 200, { success: false, message: "Invalid or expired session" });
     }
     if (session.used) {
-        return res.status(200).json({ success: false, message: "Session already used" });
+        return sendSigned(res, 200, { success: false, message: "Session already used" });
     }
     if (session.expiresAt < new Date()) {
-        return res.status(200).json({ success: false, message: "Session expired" });
+        return sendSigned(res, 200, { success: false, message: "Session expired" });
     }
 
-    // Đánh dấu đã dùng NGAY LẬP TỨC để chặn dùng lại (kể cả 2 request gần như đồng thời).
-    // findOneAndUpdate với điều kiện used:false đảm bảo chỉ 1 request thắng trong race condition.
     const result = await sessionsCollection.findOneAndUpdate(
         { sessionKey: session_key, used: false },
         { $set: { used: true, usedAt: new Date() } }
     );
 
-    if (!result) {
-        // Đã có request khác dùng session này trước đó (race condition) → từ chối.
-        return res.status(200).json({ success: false, message: "Session already used" });
+    if (!result.value) {
+        return sendSigned(res, 200, { success: false, message: "Session already used" });
     }
 
-    return res.status(200).json({
+    return sendSigned(res, 200, {
         success: true,
         module_key: REAL_MODULE_KEY,
     });
