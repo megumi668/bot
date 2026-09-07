@@ -134,7 +134,7 @@ app.post("/api/verify", async (req, res) => {
         const newHwids = normalizeHwids(result.value);
         return sendSigned(res, 200, {
             success: true,
-            module_key: REAL_MODULE_KEY,
+            module_key: keyData.moduleKey || MODULE_DECRYPT_KEY,
             message: `New device registered - Access granted (${newHwids.length}/${maxHwid} slots used)`,
         });
     }
