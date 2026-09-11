@@ -1,3 +1,4 @@
+require('dotenv').config();
 const {
     Client,
     GatewayIntentBits,
@@ -23,10 +24,20 @@ app.use(express.json());
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const API_SECRET = process.env.API_SECRET || "change-this-secret";
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 25643;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017";
 const BOOST_WEBHOOK_URL = process.env.BOOST_WEBHOOK_URL;
-const ALLOWED_GUILD_ID = "1323274926198620180"; // hub cua ong
+const ALLOWED_GUILD_ID = "1542513222995681320";
+const OWNER_IDS = ["1008693503691325481"];
+
+// Module key thật dùng để giải mã module phía client
+const MODULE_DECRYPT_KEY = process.env.MODULE_DECRYPT_KEY;
+
+// Secret dùng để KÝ RESPONSE (HMAC-SHA256).
+const RESPONSE_SIGN_SECRET = process.env.RESPONSE_SIGN_SECRET;
+
+// Secret dùng để ký định dạng key cũ (makeSign/validateKey).
+const KEY_SIGN_SECRET = process.env.KEY_SIGN_SECRET;
 
 if (!DISCORD_TOKEN) {
     console.error("DISCORD_TOKEN not set in environment!");
@@ -96,8 +107,27 @@ async function setUser(userId, data) {
         { upsert: true },
     );
 }
+
+// ─── Ký response bằng HMAC-SHA256 ───────────────────────────────────────────
+function signPayload(payloadObj) {
+    const timestamp = Date.now();
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const canonical = JSON.stringify(payloadObj) + '|' + timestamp + '|' + nonce;
+
+    const signature = crypto
+        .createHmac('sha256', RESPONSE_SIGN_SECRET)
+        .update(canonical)
+        .digest('hex');
+
+    return { ...payloadObj, timestamp, nonce, signature };
+}
+
+function sendSigned(res, statusCode, payloadObj) {
+    return res.status(statusCode).json(signPayload(payloadObj));
+}
+
 // ─── Key Generation (format: MEYYHUB-TYPE-YYMMDD-RAND5-UID5-SIGN6) ───────────
-const SECRET = "fc3bd0f753714bf725e0e0b842caf04cac513c3741b873b6faae94e49e02c369";
+const SECRET = KEY_SIGN_SECRET || "fc3bd0f753714bf725e0e0b842caf04cac513c3741b873b6faae94e49e02c369";
 const PREFIX = "AMETHYSTHUB";
 const CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -105,6 +135,7 @@ const KEY_TYPES = {
     "WEEK1": { label: "1 tuần", days: 7, maxKeys: 40 },
     "PRM01": { label: "Premium 1 tháng", days: 30, maxKeys: 10 },
     "LIFET": { label: "Lifetime", days: 99999, maxKeys: 15 },
+    "DAY03": { label: "3 ngày", days: 3, maxKeys: 40 },
 };
 
 function randStr(n) {
@@ -114,6 +145,10 @@ function randStr(n) {
     return out;
 }
 
+function generatePerKeyModuleSecret() {
+    return crypto.randomBytes(32).toString('hex'); // 64 hex chars, đủ dài cho SHA-256 input
+}
+
 function makeSign(typeCode, date, rand, uid) {
     const raw = `${typeCode}${date}${rand}${uid}${SECRET}`;
     return crypto.createHash("sha256").update(raw).digest("hex").toUpperCase().slice(0, 6);
@@ -121,8 +156,7 @@ function makeSign(typeCode, date, rand, uid) {
 
 function generateKey(typeCode, uid) {
     if (!KEY_TYPES[typeCode]) throw new Error(`Invalid type code: ${typeCode}`);
-    // Format mới: 14 ký tự random chữ hoa + số
-    return randStr(14);
+    return "LYRA" + randStr(14);
 }
 
 function validateKey(key) {
@@ -204,11 +238,9 @@ client.on("messageCreate", async (message) => {
                 ]),
         );
 
-
         try {
             const dm = await message.author.createDM();
             await dm.send({ embeds: [embed], components: [dropdown] });
-
 
             const reply = await message.channel.send({
                 content: `✅ <@${message.author.id}> Panel đã được gửi vào DM của bạn!`
@@ -216,13 +248,11 @@ client.on("messageCreate", async (message) => {
 
             setTimeout(() => reply.delete().catch(() => { }), 5000);
         } catch (error) {
-
             await message.channel.send({
                 content: `<@${message.author.id}>`,
                 embeds: [embed],
                 components: [dropdown]
             }).then(msg => {
-
                 setTimeout(() => msg.delete().catch(() => { }), 30000);
             });
         }
@@ -230,23 +260,59 @@ client.on("messageCreate", async (message) => {
     }
 
     if (message.content.startsWith('!resethwid-key')) {
-        if (!message.guild || message.guild.id !== ALLOWED_GUILD_ID) return
-        const member = await message.guild.members.fetch(message.author.id)
-        if (!member.roles.cache.some(r => r.name === 'Owner')) {
-            return message.reply('❌ Chỉ Owner mới dùng được lệnh này.')
+        if (!message.guild || message.guild.id !== ALLOWED_GUILD_ID) return;
+        if (!OWNER_IDS.includes(message.author.id)) {
+            return message.reply('❌ Chỉ Owner mới dùng được lệnh này.');
         }
-        const args = message.content.split(' ')
-        const targetKey = args[1]?.trim()
-        if (!targetKey) return message.reply('❌ Dùng: `!resethwid-key <key>`')
-        const kd = await getKey(targetKey)
-        if (!kd) return message.reply('❌ Không tìm thấy key.')
-        const hwids = normalizeHwids(kd)
-        if (hwids.length === 0) return message.reply('⚠️ Key này chưa đăng ký HWID.')
-        await setKey(targetKey, { ...kd, hwids: [], hwid: undefined })
+
+        const args = message.content.split(' ');
+        const targetKey = args[1]?.trim();
+        if (!targetKey) return message.reply('❌ Dùng: `!resethwid-key <key>` hoặc `!resethwid-key @all`');
+
+        if (targetKey === '@all' || targetKey.toLowerCase() === 'all') {
+            const result = await keysCollection.updateMany(
+                {},
+                { $set: { hwids: [] }, $unset: { hwid: "" } }
+            );
+
+            await db.collection('hwid_reset_logs').insertOne({
+                userId: message.author.id,
+                userTag: message.author.tag,
+                key: 'ALL_KEYS',
+                method: 'admin-force-all',
+                resetAt: Date.now(),
+                modifiedCount: result.modifiedCount
+            });
+
+            const embed = new EmbedBuilder()
+                .setColor('#22dd22')
+                .setTitle('✅ Đã Reset HWID Toàn Bộ Key!')
+                .setDescription(`Đã dọn sạch HWID của tất cả **${result.modifiedCount}** key trong database.`)
+                .addFields(
+                    { name: 'Thực hiện bởi', value: `<@${message.author.id}>` }
+                )
+                .setTimestamp();
+
+            return message.reply({ embeds: [embed] });
+        }
+
+        const kd = await getKey(targetKey);
+        if (!kd) return message.reply('❌ Không tìm thấy key.');
+        const hwids = normalizeHwids(kd);
+        if (hwids.length === 0) return message.reply('⚠️ Key này chưa đăng ký HWID.');
+
+        await keysCollection.updateOne(
+            { key: targetKey },
+            { $set: { hwids: [] }, $unset: { hwid: "" } }
+        );
         await db.collection('hwid_reset_logs').insertOne({
-            userId: message.author.id, userTag: message.author.tag,
-            key: targetKey, method: 'admin-force', resetAt: Date.now()
-        })
+            userId: message.author.id,
+            userTag: message.author.tag,
+            key: targetKey,
+            method: 'admin-force',
+            resetAt: Date.now()
+        });
+
         const embed = new EmbedBuilder()
             .setColor('#22dd22')
             .setTitle('✅ HWID Đã Reset')
@@ -255,79 +321,76 @@ client.on("messageCreate", async (message) => {
                 { name: 'Reset bởi', value: `<@${message.author.id}>` },
                 { name: 'Owner cũ', value: kd.userId ? `<@${kd.userId}>` : 'N/A' }
             )
-            .setTimestamp()
-        return message.reply({ embeds: [embed] })
+            .setTimestamp();
+
+        return message.reply({ embeds: [embed] });
     }
     if (message.content.startsWith('!whitelist-resetcode')) {
-        if (!message.guild || message.guild.id !== ALLOWED_GUILD_ID) return
-        const member = await message.guild.members.fetch(message.author.id)
+        if (!message.guild || message.guild.id !== ALLOWED_GUILD_ID) return;
+        const member = await message.guild.members.fetch(message.author.id);
         if (!member.roles.cache.some(r => r.name === 'Whitelist') && !member.roles.cache.some(r => r.name === 'Owner')) {
-            return message.reply('❌ Bạn không có quyền tạo reset code.')
+            return message.reply('❌ Bạn không có quyền tạo reset code.');
         }
-        const args = message.content.split(' ')
-        const qty = parseInt(args[1]) || 1
-        if (qty < 1 || qty > 50) return message.reply('❌ Số lượng phải từ 1-50.')
+        const args = message.content.split(' ');
+        const qty = parseInt(args[1]) || 1;
+        if (qty < 1 || qty > 50) return message.reply('❌ Số lượng phải từ 1-50.');
 
-        const codes = []
+        const codes = [];
         for (let i = 0; i < qty; i++) {
-            const code = 'RC-' + crypto.randomBytes(4).toString('hex').toUpperCase()
+            const code = 'RC-' + crypto.randomBytes(4).toString('hex').toUpperCase();
             await resetCodesCollection.insertOne({
                 code, used: false,
                 createdBy: message.author.id, createdAt: Date.now()
-            })
-            codes.push(code)
+            });
+            codes.push(code);
         }
 
-
         try {
-            const dm = await message.author.createDM()
-            await dm.send(`**${qty} Reset Code(s) đã tạo:**\n\`\`\`\n${codes.join('\n')}\n\`\`\`\nDùng \`/reset-code <code>\` để reset HWID.`)
+            const dm = await message.author.createDM();
+            await dm.send(`**${qty} Reset Code(s) đã tạo:**\n\`\`\`\n${codes.join('\n')}\n\`\`\`\nDùng \`/reset-code <code>\` để reset HWID.`);
         } catch { }
 
         const embed = new EmbedBuilder()
             .setColor('#00cc88')
             .setTitle(`✅ Tạo ${qty} Reset Code`)
             .setDescription('Codes đã được gửi qua DM.')
-            .setTimestamp()
-        return message.reply({ embeds: [embed] })
+            .setTimestamp();
+        return message.reply({ embeds: [embed] });
     }
 
     if (message.content.startsWith('!checkkey')) {
-        const member = await message.guild.members.fetch(message.author.id)
-        if (!member.roles.cache.some(r => r.name === 'Owner' || r.name === 'Main Developer'))
-            return message.reply('❌ Chỉ Owner hoặc Main Developer mới dùng được lệnh này.')
+        if (!OWNER_IDS.includes(message.author.id))
+            return message.reply('❌ Chỉ Owner mới dùng được lệnh này.');
 
-        const args = message.content.split(' ')
-        const targetKey = args[1]?.trim().toUpperCase()
-        if (!targetKey) return message.reply('❌ Dùng: `!checkkey <key>`')
+        const args = message.content.split(' ');
+        const targetKey = args[1]?.trim().toUpperCase();
+        if (!targetKey) return message.reply('❌ Dùng: `!checkkey <key>`');
 
-        const kd = await getKey(targetKey)
-        if (!kd) return message.reply('❌ Không tìm thấy key trong database.')
+        const kd = await getKey(targetKey);
+        if (!kd) return message.reply('❌ Không tìm thấy key trong database.');
 
-        // Validate signature & parse thời hạn từ key
-        const validation = validateKey(targetKey)
+        const validation = validateKey(targetKey);
 
-        // Tính thời gian còn lại
-        let timeLeft = '♾️ Lifetime'
-        let expiredText = ''
+        let timeLeft = '♾️ Lifetime';
+        let expiredText = '';
         if (kd.expiresAt) {
-            const remaining = kd.expiresAt - Date.now()
+            const remaining = kd.expiresAt - Date.now();
             if (remaining <= 0) {
-                timeLeft = '⛔ Đã hết hạn'
-                expiredText = '**[HẾT HẠN]**'
+                timeLeft = '⛔ Đã hết hạn';
+                expiredText = '**[HẾT HẠN]**';
             } else {
-                const days = Math.floor(remaining / 86_400_000)
-                const hours = Math.floor((remaining % 86_400_000) / 3_600_000)
-                const mins = Math.floor((remaining % 3_600_000) / 60_000)
-                timeLeft = `⏳ **${days}** ngày **${hours}** giờ **${mins}** phút`
+                const days = Math.floor(remaining / 86_400_000);
+                const hours = Math.floor((remaining % 86_400_000) / 3_600_000);
+                const mins = Math.floor((remaining % 3_600_000) / 60_000);
+                timeLeft = `⏳ **${days}** ngày **${hours}** giờ **${mins}** phút`;
             }
         }
 
-        const hwids = normalizeHwids(kd)
-        const maxHwid = kd.maxHwid ?? 1
+        const hwids = normalizeHwids(kd);
+        const maxHwid = kd.maxHwid ?? 1;
         const statusColor = !kd.active ? '#ff4444'
             : (kd.expiresAt && Date.now() > kd.expiresAt) ? '#ff8800'
-                : '#00cc88'
+                : '#00cc88';
 
         const embed = new EmbedBuilder()
             .setColor(statusColor)
@@ -346,65 +409,59 @@ client.on("messageCreate", async (message) => {
                 { name: `🖥️ HWID (${hwids.length}/${maxHwid})`, value: hwids.length > 0 ? hwids.map(h => `\`${h}\``).join('\n') : '*(chưa đăng ký)*', inline: false },
             )
             .setFooter({ text: 'Amethyst Hub • Key Inspector' })
-            .setTimestamp()
+            .setTimestamp();
 
-        return message.reply({ embeds: [embed] })
+        return message.reply({ embeds: [embed] });
     }
 
-    // ─── !checkuserkey [user_mention / user_id] ───────────────────────────────
     if (message.content.startsWith('!checkuserkey')) {
-        const member = await message.guild.members.fetch(message.author.id)
-        if (!member.roles.cache.some(r => r.name === 'Owner' || r.name === 'Main Developer'))
-            return message.reply('❌ Chỉ Owner hoặc Main Developer mới dùng được lệnh này.')
+        if (!OWNER_IDS.includes(message.author.id))
+            return message.reply('❌ Chỉ Owner mới dùng được lệnh này.');
 
-        const args = message.content.split(' ')
-        const rawArg = args[1]?.trim()
-        if (!rawArg) return message.reply('❌ Dùng: `!checkuserkey <@user hoặc userID>`')
+        const args = message.content.split(' ');
+        const rawArg = args[1]?.trim();
+        if (!rawArg) return message.reply('❌ Dùng: `!checkuserkey <@user hoặc userID>`');
 
-        // Lấy userId dù là mention hay raw ID
-        const userId = rawArg.replace(/[<@!>]/g, '')
-        if (!/^\d+$/.test(userId)) return message.reply('❌ User không hợp lệ.')
+        const userId = rawArg.replace(/[<@!>]/g, '');
+        if (!/^\d+$/.test(userId)) return message.reply('❌ User không hợp lệ.');
 
-        // Tìm tất cả key thuộc user (đã redeem hoặc được tạo cho)
-        const allKeys = await getAllKeys()
-        const ownedKeys = allKeys.filter(k => k.userId === userId)   // đã redeem
-        const receivedKeys = allKeys.filter(k => k.createdFor === userId && !k.userId) // chưa redeem, tạo cho user này
+        const allKeys = await getAllKeys();
+        const ownedKeys = allKeys.filter(k => k.userId === userId);
+        const receivedKeys = allKeys.filter(k => k.createdFor === userId && !k.userId);
 
-        const total = ownedKeys.length + receivedKeys.length
+        const total = ownedKeys.length + receivedKeys.length;
         if (total === 0)
-            return message.reply(`❌ Không tìm thấy key nào liên quan đến <@${userId}>.`)
+            return message.reply(`❌ Không tìm thấy key nào liên quan đến <@${userId}>.`);
 
-        // Helper hiển thị 1 key ngắn gọn
         const formatKeyLine = (k) => {
-            const label = k.typeLabel || 'N/A'
-            const status = !k.active ? '🚫' : (k.expiresAt && Date.now() > k.expiresAt) ? '⛔' : '✅'
+            const label = k.typeLabel || 'N/A';
+            const status = !k.active ? '🚫' : (k.expiresAt && Date.now() > k.expiresAt) ? '⛔' : '✅';
             const expStr = k.expiresAt
                 ? `<t:${Math.floor(k.expiresAt / 1000)}:d>`
-                : '♾️'
-            return `${status} \`${k.key}\` — ${label} — hết hạn: ${expStr}`
-        }
+                : '♾️';
+            return `${status} \`${k.key}\` — ${label} — hết hạn: ${expStr}`;
+        };
 
-        // Discord field value max 1024 ký tự — chia chunk nếu cần
         const buildChunks = (keys, emptyText) => {
-            if (keys.length === 0) return [emptyText]
-            const lines = keys.map(formatKeyLine)
-            const chunks = []
-            let chunk = ''
+            if (keys.length === 0) return [emptyText];
+            const lines = keys.map(formatKeyLine);
+            const chunks = [];
+            let chunk = '';
             for (const line of lines) {
-                if ((chunk + '\n' + line).length > 1000) { chunks.push(chunk); chunk = line }
-                else chunk = chunk ? chunk + '\n' + line : line
+                if ((chunk + '\n' + line).length > 1000) { chunks.push(chunk); chunk = line; }
+                else chunk = chunk ? chunk + '\n' + line : line;
             }
-            if (chunk) chunks.push(chunk)
-            return chunks
-        }
+            if (chunk) chunks.push(chunk);
+            return chunks;
+        };
 
-        const redeemedChunks = buildChunks(ownedKeys, '*(không có)*')
-        const pendingChunks = buildChunks(receivedKeys, '*(không có)*')
+        const redeemedChunks = buildChunks(ownedKeys, '*(không có)*');
+        const pendingChunks = buildChunks(receivedKeys, '*(không có)*');
 
-        let targetTag = `<@${userId}>`
+        let targetTag = `<@${userId}>`;
         try {
-            const u = await client.users.fetch(userId)
-            targetTag = `**${u.username}** (<@${userId}>)`
+            const u = await client.users.fetch(userId);
+            targetTag = `**${u.username}** (<@${userId}>)`;
         } catch { }
 
         const embed = new EmbedBuilder()
@@ -412,27 +469,25 @@ client.on("messageCreate", async (message) => {
             .setTitle(`🗂️ Keys của ${targetTag.replace(/\*\*/g, '')}`)
             .setDescription(`Tổng cộng: **${total}** key(s) — ✅ Đã redeem: **${ownedKeys.length}** — ⏳ Chưa redeem: **${receivedKeys.length}**`)
             .setFooter({ text: 'Amethyst Hub • Key Inspector' })
-            .setTimestamp()
+            .setTimestamp();
 
-        // Thêm field cho từng chunk đã redeem
         redeemedChunks.forEach((chunk, i) => {
             embed.addFields({
-                name: i === 0 ? `✅ Đã redeem (${ownedKeys.length})` : '​', // zero-width space cho tiêu đề tiếp theo
+                name: i === 0 ? `✅ Đã redeem (${ownedKeys.length})` : '',
                 value: chunk,
                 inline: false
-            })
-        })
+            });
+        });
 
-        // Thêm field cho từng chunk chưa redeem
         pendingChunks.forEach((chunk, i) => {
             embed.addFields({
-                name: i === 0 ? `⏳ Chưa redeem / tạo cho user này (${receivedKeys.length})` : '​',
+                name: i === 0 ? `⏳ Chưa redeem / tạo cho user này (${receivedKeys.length})` : '',
                 value: chunk,
                 inline: false
-            })
-        })
+            });
+        });
 
-        return message.reply({ embeds: [embed] })
+        return message.reply({ embeds: [embed] });
     }
 });
 
@@ -472,6 +527,7 @@ const slashCommands = [
                     { name: "1 tuần         (WEEK1)", value: "WEEK1" },
                     { name: "Premium 1 tháng (PRM01)", value: "PRM01" },
                     { name: "Lifetime        (LIFET)", value: "LIFET" },
+                    { name: "3 ngày          (DAY03)", value: "DAY03" },
                 ),
         )
         .addIntegerOption((o) =>
@@ -529,6 +585,7 @@ const slashCommands = [
                     { name: "1 tuần          (WEEK1)", value: "WEEK1" },
                     { name: "Premium 1 tháng (PRM01)", value: "PRM01" },
                     { name: "Lifetime        (LIFET)", value: "LIFET" },
+                    { name: "3 ngày          (DAY03)", value: "DAY03" },
                 ),
         )
         .addIntegerOption((o) =>
@@ -537,6 +594,20 @@ const slashCommands = [
                 .setRequired(false)
                 .setMinValue(1)
                 .setMaxValue(10),
+        ),
+
+    new SlashCommandBuilder()
+        .setName("keycheck")
+        .setDescription("[Owner] Xem chi tiết 1 key (bao gồm danh sách HWID)")
+        .addStringOption((o) =>
+            o.setName("key").setDescription("Key cần kiểm tra").setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName("keyremove")
+        .setDescription("[Owner] Xoá hẳn 1 key khỏi hệ thống")
+        .addStringOption((o) =>
+            o.setName("key").setDescription("Key cần xoá").setRequired(true),
         ),
 
     new SlashCommandBuilder()
@@ -557,20 +628,31 @@ const slashCommands = [
         .addIntegerOption((o) =>
             o.setName("max").setDescription("New max HWID count").setRequired(true),
         ),
+
+    new SlashCommandBuilder()
+        .setName("syncmanual")
+        .setDescription("[Owner] Đồng bộ key cấp thủ công vào users + tự gán role"),
+
+    new SlashCommandBuilder()
+        .setName("hwidreset")
+        .setDescription("[Owner] Reset HWID của 1 key hoặc tất cả key (@all)")
+        .addStringOption((o) =>
+            o.setName("target")
+                .setDescription("Nhập mã key cụ thể hoặc gõ @all để reset toàn bộ")
+                .setRequired(true)
+        ),
 ];
 
 async function registerSlashCommands() {
     try {
         const rest = new REST().setToken(DISCORD_TOKEN);
 
-        // Xóa global commands cũ (nếu có) để tránh conflict
         await rest.put(
             Routes.applicationCommands(client.user.id),
             { body: [] }
         );
         console.log("🗑️ Cleared global slash commands");
 
-        // Register guild commands (cập nhật ngay lập tức)
         const result = await rest.put(
             Routes.applicationGuildCommands(client.user.id, ALLOWED_GUILD_ID),
             { body: slashCommands.map((c) => c.toJSON()) },
@@ -600,11 +682,9 @@ client.on("interactionCreate", async (interaction) => {
             return;
         }
 
-
         if (interaction.isChatInputCommand()) {
             await interaction.deferReply({ ephemeral: true });
         }
-
 
         if (
             interaction.isStringSelectMenu() &&
@@ -619,15 +699,12 @@ client.on("interactionCreate", async (interaction) => {
         if (interaction.isChatInputCommand()) {
             const commandName = interaction.commandName;
 
-            // Phân quyền lệnh:
-            // - Ai cũng dùng được: /redeem
-            // - Premium: /redeem + /resethwid + /managekey
-            // - Owner: tất cả
             const memberCheck = await interaction.guild.members.fetch(interaction.user.id);
-            const isOwner = memberCheck.roles.cache.some(r => r.name === "Owner");
-            const hasPremium = memberCheck.roles.cache.some(r => r.name === "Premium");
+            const isOwner = OWNER_IDS.includes(interaction.user.id);
+            console.log(`🔍 Roles của ${interaction.user.tag}:`, memberCheck.roles.cache.map(r => `"${r.name}"`).join(", "));
+            const hasPremium = memberCheck.roles.cache.some(r => r.name === "Lyra+");
 
-            const ownerOnlyCommands = ["genkey", "whitelist", "blacklist", "stats", "addhwid", "removehwid", "setmaxhwid", "reset-code", "checkuser"];
+            const ownerOnlyCommands = ["genkey", "whitelist", "blacklist", "stats", "addhwid", "removehwid", "setmaxhwid", "reset-code", "checkuser", "syncmanual", "keycheck", "keyremove", "hwidreset"];
             const premiumCommands = ["resethwid", "managekey"];
 
             if (ownerOnlyCommands.includes(commandName) && !isOwner) {
@@ -638,7 +715,7 @@ client.on("interactionCreate", async (interaction) => {
 
             if (premiumCommands.includes(commandName) && !hasPremium && !isOwner) {
                 return interaction.editReply({
-                    content: "❌ Bạn cần role **Premium** để dùng lệnh này! Dùng /redeem để kích hoạt key trước."
+                    content: "❌ Bạn cần role **Lyra+** để dùng lệnh này! Dùng /redeem để kích hoạt key trước."
                 });
             }
 
@@ -675,9 +752,200 @@ client.on("interactionCreate", async (interaction) => {
                 return await interaction.editReply({ embeds: [embed] });
             }
 
+            if (commandName === "syncmanual") {
+                const manualKeys = await keysCollection.find({
+                    createdBy: "manual-owner",
+                    userId: { $ne: null },
+                }).toArray();
+
+                let syncedUsers = 0;
+                let rolesAdded = 0;
+                let errors = 0;
+                const guild = interaction.guild;
+                const role = guild.roles.cache.find(r => r.name === "Lyra+");
+
+                for (const keyData of manualKeys) {
+                    const userId = keyData.userId;
+                    try {
+                        const user = (await getUser(userId)) || { userId, keys: [] };
+                        user.keys = user.keys || [];
+                        if (!user.keys.includes(keyData.key)) {
+                            user.keys.push(keyData.key);
+                            await setUser(userId, user);
+                            syncedUsers++;
+                        }
+
+                        if (role) {
+                            const member = await guild.members.fetch(userId).catch(() => null);
+                            if (member && !member.roles.cache.has(role.id)) {
+                                await member.roles.add(role);
+                                rolesAdded++;
+                            }
+                        }
+                    } catch (err) {
+                        errors++;
+                        console.error(`❌ Lỗi sync userId ${userId}: ${err.message}`);
+                    }
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor("#00cc88")
+                    .setTitle("✅ Đồng bộ key thủ công hoàn tất")
+                    .addFields(
+                        { name: "Tổng key thủ công tìm thấy", value: String(manualKeys.length), inline: true },
+                        { name: "User được đồng bộ vào DB", value: String(syncedUsers), inline: true },
+                        { name: "Role Lyra+ được gán mới", value: String(rolesAdded), inline: true },
+                        { name: "Lỗi (không tìm thấy member/khác)", value: String(errors), inline: true },
+                    )
+                    .setTimestamp();
+
+                return interaction.editReply({ embeds: [embed] });
+            }
+
+            if (commandName === "genkey") {
+                const typeCode = interaction.options.getString("type");
+                const amount = interaction.options.getInteger("amount") ?? 1;
+
+                const typeInfo = KEY_TYPES[typeCode];
+                if (!typeInfo) {
+                    return interaction.editReply({ content: `❌ Loại key không hợp lệ: ${typeCode}` });
+                }
+
+                const days = typeInfo.days;
+                const createdKeys = [];
+
+                for (let i = 0; i < amount; i++) {
+                    const key = generateKey(typeCode, "1008693503691325481");
+                    const expiresAt = days >= 99999 ? null : Date.now() + days * 86_400_000;
+                    await setKey(key, {
+                        key,
+                        typeCode,
+                        typeLabel: typeInfo.label,
+                        userId: null,
+                        hwids: [],
+                        maxHwid: 1,
+                        active: true,
+                        expiresAt,
+                        createdAt: Date.now(),
+                        createdBy: interaction.user.id,
+                        createdFor: null,
+                        redeemedAt: null,
+                        moduleKey: generatePerKeyModuleSecret(),
+                    });
+                    createdKeys.push({ key, expiresAt });
+                }
+
+                await db.collection("key_creation_logs").insertOne({
+                    createdBy: interaction.user.id,
+                    createdByTag: interaction.user.tag,
+                    createdFor: null,
+                    quantity: amount,
+                    typeCode,
+                    days,
+                    maxHwid: 1,
+                    keys: createdKeys.map((k) => k.key),
+                    createdAt: Date.now(),
+                });
+
+                const embed = new EmbedBuilder()
+                    .setColor("#00cc88")
+                    .setTitle(`✅ Đã tạo ${amount} key`)
+                    .addFields(
+                        { name: "Loại key", value: `**${typeInfo.label}** (\`${typeCode}\`)` },
+                        { name: "Thời hạn", value: days >= 99999 ? "♾️ Lifetime" : `⏰ ${days} ngày` },
+                        { name: "Keys", value: "```\n" + createdKeys.map((k) => k.key).join("\n") + "\n```" },
+                    )
+                    .setTimestamp();
+
+                return interaction.editReply({ embeds: [embed] });
+            }
+
+            if (commandName === "keycheck") {
+                const targetKey = interaction.options.getString("key").trim();
+                const kd = await getKey(targetKey);
+                if (!kd) {
+                    return interaction.editReply({ content: "❌ Không tìm thấy key trong database." });
+                }
+
+                let timeLeft = "♾️ Lifetime";
+                let expiredText = "";
+                if (kd.expiresAt) {
+                    const remaining = kd.expiresAt - Date.now();
+                    if (remaining <= 0) {
+                        timeLeft = "⛔ Đã hết hạn";
+                        expiredText = "**[HẾT HẠN]**";
+                    } else {
+                        const days = Math.floor(remaining / 86_400_000);
+                        const hours = Math.floor((remaining % 86_400_000) / 3_600_000);
+                        const mins = Math.floor((remaining % 3_600_000) / 60_000);
+                        timeLeft = `⏳ **${days}** ngày **${hours}** giờ **${mins}** phút`;
+                    }
+                }
+
+                const hwids = normalizeHwids(kd);
+                const maxHwid = kd.maxHwid ?? 1;
+                const statusColor = !kd.active ? "#ff4444"
+                    : (kd.expiresAt && Date.now() > kd.expiresAt) ? "#ff8800"
+                        : "#00cc88";
+
+                const embed = new EmbedBuilder()
+                    .setColor(statusColor)
+                    .setTitle(`🔑 Chi tiết Key ${expiredText}`)
+                    .addFields(
+                        { name: "🔑 Key", value: `\`${targetKey}\``, inline: false },
+                        { name: "📦 Loại", value: kd.typeLabel || "N/A", inline: true },
+                        { name: "🛡️ Trạng thái", value: kd.active ? "✅ Active" : "🚫 Blacklisted", inline: true },
+                        { name: "⏰ Còn lại", value: timeLeft, inline: false },
+                        { name: "👤 Tạo bởi", value: kd.createdBy ? `<@${kd.createdBy}>` : "N/A", inline: true },
+                        { name: "✅ Redeemed bởi", value: kd.userId ? `<@${kd.userId}>` : "❌ Chưa redeem", inline: true },
+                        { name: `🖥️ HWID (${hwids.length}/${maxHwid})`, value: hwids.length > 0 ? hwids.map((h) => `\`${h}\``).join("\n") : "*(chưa đăng ký)*", inline: false },
+                    )
+                    .setFooter({ text: "Amethyst Hub • Key Inspector" })
+                    .setTimestamp();
+
+                return interaction.editReply({ embeds: [embed] });
+            }
+
+            if (commandName === "keyremove") {
+                const targetKey = interaction.options.getString("key").trim();
+                const kd = await getKey(targetKey);
+                if (!kd) {
+                    return interaction.editReply({ content: "❌ Không tìm thấy key trong database." });
+                }
+
+                await keysCollection.deleteOne({ key: targetKey });
+
+                if (kd.userId) {
+                    const u = await getUser(kd.userId);
+                    if (u && u.keys) {
+                        u.keys = u.keys.filter((k) => k !== targetKey);
+                        await setUser(kd.userId, u);
+                    }
+                }
+
+                await db.collection("key_removal_logs").insertOne({
+                    key: targetKey,
+                    removedBy: interaction.user.id,
+                    removedByTag: interaction.user.tag,
+                    previousOwner: kd.userId || null,
+                    removedAt: Date.now(),
+                });
+
+                const embed = new EmbedBuilder()
+                    .setColor("#ff4444")
+                    .setTitle("🗑️ Key Đã Bị Xoá")
+                    .addFields(
+                        { name: "Key", value: `\`${targetKey}\`` },
+                        { name: "Xoá bởi", value: `<@${interaction.user.id}>` },
+                        { name: "Chủ cũ", value: kd.userId ? `<@${kd.userId}>` : "Chưa redeem" },
+                    )
+                    .setTimestamp();
+
+                return interaction.editReply({ embeds: [embed] });
+            }
+
             if (commandName === "checkuser") {
-                const member = await interaction.guild.members.fetch(interaction.user.id);
-                const isOwner = member.roles.cache.some(r => r.name === "Owner");
+                const isOwner = OWNER_IDS.includes(interaction.user.id);
                 if (!isOwner) {
                     return interaction.editReply({ content: "❌ Chỉ **Owner** mới dùng được lệnh này!" });
                 }
@@ -726,11 +994,8 @@ client.on("interactionCreate", async (interaction) => {
 
             if (commandName === "blacklist") {
                 const key = interaction.options.getString("key");
-                const member = await interaction.guild.members.fetch(
-                    interaction.user.id,
-                );
-                if (!member.roles.cache.some((r) => r.name === "Owner"))
-                    return interaction.editReply({ content: "❌ Missing Owner role" });
+                if (!OWNER_IDS.includes(interaction.user.id))
+                    return interaction.editReply({ content: "❌ Missing Owner permission" });
 
                 const keyData = await getKey(key);
                 if (!keyData)
@@ -775,11 +1040,8 @@ client.on("interactionCreate", async (interaction) => {
                 const typeCode = interaction.options.getString("type_code");
                 const maxHwid = interaction.options.getInteger("max_hwid") ?? 1;
 
-                const member = await interaction.guild.members.fetch(
-                    interaction.user.id,
-                );
-                if (!member.roles.cache.some((r) => r.name === "Owner"))
-                    return interaction.editReply({ content: "❌ Missing Owner role" });
+                if (!OWNER_IDS.includes(interaction.user.id))
+                    return interaction.editReply({ content: "❌ Missing Owner permission" });
 
                 if (quantity < 1 || quantity > 100)
                     return interaction.editReply({
@@ -792,29 +1054,29 @@ client.on("interactionCreate", async (interaction) => {
                 const typeInfo = KEY_TYPES[typeCode];
                 const days = typeInfo.days;
 
-                // UID lấy từ 5 ký tự đầu Discord ID của người nhận
                 const uid = targetUser.id.slice(0, 5).toUpperCase().padEnd(5, "0");
 
                 const createdKeys = [];
                 for (let i = 0; i < quantity; i++) {
-                    const key = generateKey(typeCode, uid);
-                    const expiresAt = days >= 99999 ? null : Date.now() + days * 86_400_000;
-                    await setKey(key, {
-                        key,
-                        typeCode,
-                        typeLabel: typeInfo.label,
-                        userId: null,
-                        hwids: [],
-                        maxHwid,
-                        active: true,
-                        expiresAt,
-                        createdAt: Date.now(),
-                        createdBy: interaction.user.id,
-                        createdFor: targetUser.id,
-                        redeemedAt: null,
-                    });
-                    createdKeys.push({ key, expiresAt });
-                }
+    const key = generateKey(typeCode, uid);
+    const expiresAt = days >= 99999 ? null : Date.now() + days * 86_400_000;
+    await setKey(key, {
+        key,
+        typeCode,
+        typeLabel: typeInfo.label,
+        userId: null,
+        hwids: [],
+        maxHwid,
+        active: true,
+        expiresAt,
+        createdAt: Date.now(),
+        createdBy: interaction.user.id,
+        createdFor: targetUser.id,
+        redeemedAt: null,
+        moduleKey: generatePerKeyModuleSecret(), 
+    });
+    createdKeys.push({ key, expiresAt });
+}
 
                 await db.collection("key_creation_logs").insertOne({
                     createdBy: interaction.user.id,
@@ -890,11 +1152,8 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             if (commandName === "addhwid") {
-                const member = await interaction.guild.members.fetch(
-                    interaction.user.id,
-                );
-                if (!member.roles.cache.some((r) => r.name === "Owner"))
-                    return interaction.editReply({ content: "❌ Missing Owner role" });
+                if (!OWNER_IDS.includes(interaction.user.id))
+                    return interaction.editReply({ content: "❌ Missing Owner permission" });
 
                 const key = interaction.options.getString("key");
                 const hwid = interaction.options.getString("hwid");
@@ -918,7 +1177,10 @@ client.on("interactionCreate", async (interaction) => {
                     });
 
                 hwids.push(hwid);
-                await setKey(key, { ...keyData, hwids, hwid: undefined });
+                await keysCollection.updateOne(
+                    { key },
+                    { $set: { hwids }, $unset: { hwid: "" } }
+                );
                 await db.collection("hwid_register_logs").insertOne({
                     key,
                     hwid,
@@ -940,27 +1202,26 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             if (commandName === 'reset-code') {
-                const code = interaction.options.getString('code').trim().toUpperCase()
-                const codeData = await resetCodesCollection.findOne({ code, used: false })
-                if (!codeData) return interaction.editReply({ content: '❌ Code không hợp lệ hoặc đã được dùng!' })
+                const code = interaction.options.getString('code').trim().toUpperCase();
+                const codeData = await resetCodesCollection.findOne({ code, used: false });
+                if (!codeData) return interaction.editReply({ content: '❌ Code không hợp lệ hoặc đã được dùng!' });
 
-
-                const user = await getUser(interaction.user.id)
+                const user = await getUser(interaction.user.id);
                 if (!user || !user.keys || user.keys.length === 0) {
-                    return interaction.editReply({ content: '❌ Bạn chưa có key nào.' })
+                    return interaction.editReply({ content: '❌ Bạn chưa có key nào.' });
                 }
 
-                const keysWithHwid = []
+                const keysWithHwid = [];
                 for (const k of user.keys) {
-                    const kd = await getKey(k)
-                    const hwids = normalizeHwids(kd)
+                    const kd = await getKey(k);
+                    const hwids = normalizeHwids(kd);
                     if (kd && hwids.length > 0) {
-                        keysWithHwid.push({ key: k, hwids, maxHwid: kd.maxHwid ?? 1 })
+                        keysWithHwid.push({ key: k, hwids, maxHwid: kd.maxHwid ?? 1 });
                     }
                 }
 
                 if (keysWithHwid.length === 0) {
-                    return interaction.editReply({ content: '❌ Bạn chưa có key nào có HWID để reset.' })
+                    return interaction.editReply({ content: '❌ Bạn chưa có key nào có HWID để reset.' });
                 }
 
                 const menu = new ActionRowBuilder().addComponents(
@@ -974,44 +1235,55 @@ client.on("interactionCreate", async (interaction) => {
                                 value: item.key,
                             })),
                         ),
-                )
+                );
 
                 return interaction.editReply({
                     content: `✅ Chọn **1 key** để reset HWID bằng code \`${code}\`:`,
                     components: [menu],
-                })
+                });
             }
 
             if (commandName === "removehwid") {
-                const member = await interaction.guild.members.fetch(
-                    interaction.user.id,
-                );
-                if (!member.roles.cache.some((r) => r.name === "Owner"))
-                    return interaction.editReply({ content: "❌ Missing Owner role" });
+                if (!OWNER_IDS.includes(interaction.user.id))
+                    return interaction.editReply({ content: "❌ Missing Owner permission" });
 
-                const key = interaction.options.getString("key");
-                const hwid = interaction.options.getString("hwid");
+                const key = interaction.options.getString("key").trim().toUpperCase();
+                const inputHwid = interaction.options.getString("hwid")?.trim();
                 const keyData = await getKey(key);
+                
                 if (!keyData)
-                    return interaction.editReply({ content: "❌ Key not found" });
+                    return interaction.editReply({ content: "❌ Không tìm thấy key này trong database." });
 
                 const hwids = normalizeHwids(keyData);
-                if (!hwids.includes(hwid))
-                    return interaction.editReply({
-                        content: "❌ HWID not found on this key.",
-                    });
+                if (hwids.length === 0)
+                    return interaction.editReply({ content: "⚠️ Key này hiện chưa có HWID nào." });
 
-                const updated = hwids.filter((h) => h !== hwid);
-                await setKey(key, { ...keyData, hwids: updated, hwid: undefined });
+                let updated = [];
+                let removedHwid = "";
+                if (inputHwid && hwids.includes(inputHwid)) {
+                    updated = hwids.filter((h) => h !== inputHwid);
+                    removedHwid = inputHwid;
+                } else {
+                    removedHwid = hwids[0];
+                    updated = hwids.slice(1);
+                }
+
+                await keysCollection.updateOne(
+                    { key },
+                    { 
+                        $set: { hwids: updated },
+                        $unset: { hwid: "" }
+                    }
+                );
 
                 const embed = new EmbedBuilder()
                     .setColor("#ff9900")
-                    .setTitle("🗑️ HWID Removed")
+                    .setTitle("🗑️ HWID Đã Được Xóa")
                     .addFields(
                         { name: "Key", value: `\`${key}\`` },
-                        { name: "Removed HWID", value: `\`${hwid}\`` },
+                        { name: "HWID đã xóa", value: `\`${removedHwid}\`` },
                         {
-                            name: "Slots used",
+                            name: "Slots còn dùng",
                             value: `**${updated.length} / ${keyData.maxHwid ?? 1}**`,
                         },
                     )
@@ -1019,12 +1291,83 @@ client.on("interactionCreate", async (interaction) => {
                 return interaction.editReply({ embeds: [embed] });
             }
 
-            if (commandName === "setmaxhwid") {
-                const member = await interaction.guild.members.fetch(
-                    interaction.user.id,
+            if (commandName === "hwidreset") {
+                const rawTarget = interaction.options.getString("target").trim();
+
+                if (rawTarget === "@all" || rawTarget.toLowerCase() === "all") {
+                    const result = await keysCollection.updateMany(
+                        {},
+                        { 
+                            $set: { hwids: [] },
+                            $unset: { hwid: "" }
+                        }
+                    );
+
+                    await db.collection("hwid_reset_logs").insertOne({
+                        userId: interaction.user.id,
+                        userTag: interaction.user.tag,
+                        key: "ALL_KEYS",
+                        method: "slash-hwidreset-all",
+                        resetAt: Date.now(),
+                        modifiedCount: result.modifiedCount,
+                    });
+
+                    const embed = new EmbedBuilder()
+                        .setColor("#22dd22")
+                        .setTitle("✅ Reset HWID Toàn Bộ Thành Công")
+                        .setDescription(`Đã dọn sạch HWID của toàn bộ **${result.modifiedCount}** key trong database.`)
+                        .addFields(
+                            { name: "Thực hiện bởi", value: `<@${interaction.user.id}>` }
+                        )
+                        .setTimestamp();
+
+                    return interaction.editReply({ embeds: [embed] });
+                }
+
+                const target = rawTarget.toUpperCase();
+                const keyData = await getKey(target);
+                if (!keyData) {
+                    return interaction.editReply({ content: `❌ Không tìm thấy key \`${target}\` trong database.` });
+                }
+
+                const oldHwids = normalizeHwids(keyData);
+                if (oldHwids.length === 0) {
+                    return interaction.editReply({ content: "⚠️ Key này chưa đăng ký HWID nào (0/1)." });
+                }
+
+                await keysCollection.updateOne(
+                    { key: target },
+                    { 
+                        $set: { hwids: [] },
+                        $unset: { hwid: "" }
+                    }
                 );
-                if (!member.roles.cache.some((r) => r.name === "Owner"))
-                    return interaction.editReply({ content: "❌ Missing Owner role" });
+
+                await db.collection("hwid_reset_logs").insertOne({
+                    userId: interaction.user.id,
+                    userTag: interaction.user.tag,
+                    key: target,
+                    oldHwids,
+                    method: "slash-hwidreset-single",
+                    resetAt: Date.now(),
+                });
+
+                const embed = new EmbedBuilder()
+                    .setColor("#22dd22")
+                    .setTitle("✅ Reset HWID Key Thành Công")
+                    .addFields(
+                        { name: "Key", value: `\`${target}\`` },
+                        { name: "HWID đã dọn", value: `${oldHwids.length} thiết bị` },
+                        { name: "Owner", value: keyData.userId ? `<@${keyData.userId}>` : "Chưa redeem" },
+                    )
+                    .setTimestamp();
+
+                return interaction.editReply({ embeds: [embed] });
+            }
+
+            if (commandName === "setmaxhwid") {
+                if (!OWNER_IDS.includes(interaction.user.id))
+                    return interaction.editReply({ content: "❌ Missing Owner permission" });
 
                 const key = interaction.options.getString("key");
                 const max = interaction.options.getInteger("max");
@@ -1036,7 +1379,10 @@ client.on("interactionCreate", async (interaction) => {
                     return interaction.editReply({ content: "❌ Key not found" });
 
                 const hwids = normalizeHwids(keyData);
-                await setKey(key, { ...keyData, hwids, maxHwid: max, hwid: undefined });
+                await keysCollection.updateOne(
+                    { key },
+                    { $set: { hwids, maxHwid: max }, $unset: { hwid: "" } }
+                );
 
                 const embed = new EmbedBuilder()
                     .setColor("#5865F2")
@@ -1062,7 +1408,6 @@ client.on("interactionCreate", async (interaction) => {
                 if (keyData.expiresAt && Date.now() > keyData.expiresAt)
                     return interaction.editReply({ content: "❌ Key đã hết hạn!" });
 
-                // Kiểm tra người dùng đã có key active chưa
                 const existingUser = await getUser(interaction.user.id);
                 if (existingUser && existingUser.keys && existingUser.keys.length > 0) {
                     const now = Date.now();
@@ -1097,13 +1442,13 @@ client.on("interactionCreate", async (interaction) => {
                 try {
                     const guild = interaction.guild;
                     if (guild) {
-                        const role = guild.roles.cache.find((r) => r.name === "Premium");
+                        const role = guild.roles.cache.find((r) => r.name === "Lyra+");
                         if (role) {
                             const member = await guild.members.fetch(interaction.user.id);
                             await member.roles.add(role);
-                            roleMsg = "✅ Premium role added";
+                            roleMsg = "✅ Lyra+ role added";
                         } else {
-                            roleMsg = "⚠️ Role Premium not found";
+                            roleMsg = "⚠️ Role Lyra+ not found";
                         }
                     }
                 } catch {
@@ -1208,7 +1553,6 @@ client.on("interactionCreate", async (interaction) => {
             }
         }
 
-
         if (
             interaction.isStringSelectMenu() &&
             interaction.customId === "panel_dropdown"
@@ -1252,13 +1596,13 @@ client.on("interactionCreate", async (interaction) => {
                 cooldownName = "2 hours";
             } else if (
                 member &&
-                member.roles.cache.some((r) => r.name === "Premium")
+                member.roles.cache.some((r) => r.name === "Lyra+")
             ) {
                 cooldownTime = 2.5 * 24 * 60 * 60 * 1000;
                 cooldownName = "2.5 days";
             } else {
                 return interaction.editReply({
-                    content: "❌ You need Premium role to reset HWID.",
+                    content: "❌ You need Lyra+ role to reset HWID.",
                 });
             }
 
@@ -1304,7 +1648,6 @@ client.on("interactionCreate", async (interaction) => {
             return interaction.editReply({ embeds: [embed], components: [row] });
         }
 
-
         if (
             interaction.isStringSelectMenu() &&
             interaction.customId.startsWith("reset_code_select_")
@@ -1327,7 +1670,6 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             const maxHwid = keyData.maxHwid ?? 1;
-
 
             const pendingKey = `${interaction.user.id}_${code}`;
             pendingResets.set(pendingKey, {
@@ -1372,7 +1714,10 @@ client.on("interactionCreate", async (interaction) => {
                 });
 
             const oldHwids = normalizeHwids(keyData);
-            await setKey(key, { ...keyData, hwids: [], hwid: undefined });
+            await keysCollection.updateOne(
+                { key },
+                { $set: { hwids: [] }, $unset: { hwid: "" } }
+            );
 
             const user = (await getUser(interaction.user.id)) || {
                 userId: interaction.user.id,
@@ -1415,7 +1760,6 @@ client.on("interactionCreate", async (interaction) => {
             });
         }
 
-
         if (
             interaction.isButton() &&
             interaction.customId.startsWith("confirm_reset_code_")
@@ -1429,7 +1773,6 @@ client.on("interactionCreate", async (interaction) => {
                     ephemeral: true,
                 });
             }
-
 
             if (Date.now() > reset.expiresAt) {
                 pendingResets.delete(pendingKey);
@@ -1452,8 +1795,10 @@ client.on("interactionCreate", async (interaction) => {
             }
 
             const hwids = normalizeHwids(keyData);
-            await setKey(selectedKey, { ...keyData, hwids: [], hwid: undefined });
-
+            await keysCollection.updateOne(
+                { key: selectedKey },
+                { $set: { hwids: [] }, $unset: { hwid: "" } }
+            );
 
             await resetCodesCollection.updateOne(
                 { code },
@@ -1469,7 +1814,6 @@ client.on("interactionCreate", async (interaction) => {
                 resetCount: 1,
                 resetAt: Date.now(),
             });
-
 
             pendingResets.delete(pendingKey);
 
@@ -1621,13 +1965,13 @@ client.on("interactionCreate", async (interaction) => {
                     ephemeral: true,
                 });
 
-            await setKey(key, {
-                ...data,
-                userId: null,
-                redeemedAt: null,
-                hwids: [],
-                hwid: undefined,
-            });
+            await keysCollection.updateOne(
+                { key },
+                {
+                    $set: { userId: null, redeemedAt: null, hwids: [] },
+                    $unset: { hwid: "" },
+                }
+            );
 
             const user = (await getUser(interaction.user.id)) || {
                 userId: interaction.user.id,
@@ -1655,7 +1999,6 @@ client.on("interactionCreate", async (interaction) => {
         } catch { }
     }
 });
-
 
 function authenticate(req, res, next) {
     if (req.headers["x-api-key"] !== API_SECRET)
@@ -1708,6 +2051,7 @@ app.post("/api/keys/create", authenticate, async (req, res) => {
             expiresAt,
             createdAt: Date.now(),
             redeemedAt: null,
+            moduleKey: generatePerKeyModuleSecret(),
         });
         createdKeys.push({
             key,
@@ -1751,7 +2095,7 @@ app.get("/api/keys/list", authenticate, async (req, res) => {
             hwids,
             maxHwid: k.maxHwid ?? 1,
             hwidSlots: `${hwids.length}/${k.maxHwid ?? 1}`,
-            isExpired: k.expiresAt && Date.now() > k.expiresAt,
+            isExpired: keyData.expiresAt && Date.now() > keyData.expiresAt,
         };
     });
     res.json({
@@ -1761,103 +2105,112 @@ app.get("/api/keys/list", authenticate, async (req, res) => {
     });
 });
 
+// ── /api/verify: Kiểm tra HWID và trả trực tiếp module_key khi hợp lệ
 app.post("/api/verify", async (req, res) => {
     const { key, hwid } = req.body;
 
     if (!key || !hwid)
-        return res
-            .status(400)
-            .json({ success: false, message: "Key and HWID are required" });
+        return sendSigned(res, 400, { success: false, message: "Key and HWID are required" });
 
     const keyData = await getKey(key);
 
     if (!keyData)
-        return res
-            .status(200)
-            .json({ success: false, message: "Invalid key - Key does not exist" });
+        return sendSigned(res, 200, { success: false, message: "Invalid key - Key does not exist" });
 
     if (!keyData.active)
-        return res.status(200).json({
-            success: false,
-            message: "Key is blacklisted and cannot be used",
-        });
+        return sendSigned(res, 200, { success: false, message: "Key is blacklisted and cannot be used" });
 
     if (keyData.expiresAt && Date.now() > keyData.expiresAt)
-        return res.status(200).json({ success: false, message: "Key has expired" });
+        return sendSigned(res, 200, { success: false, message: "Key has expired" });
 
     if (!keyData.userId)
-        return res.status(200).json({
+        return sendSigned(res, 200, {
             success: false,
-            message:
-                "Key not redeemed yet - Please redeem key first using Discord bot",
+            message: "Key not redeemed yet - Please redeem key first using Discord bot",
         });
 
     const hwids = normalizeHwids(keyData);
     const maxHwid = keyData.maxHwid ?? 1;
 
+    // Trường hợp 1: HWID đã được đăng ký trên key này
     if (hwids.includes(hwid)) {
-        return res.status(200).json({
+        return sendSigned(res, 200, {
             success: true,
+            module_key: keyData.moduleKey || MODULE_DECRYPT_KEY,
             message: `HWID verified - Access granted (${hwids.length}/${maxHwid} slots used)`,
         });
     }
 
+    // Trường hợp 2: Còn slot trống, tự động đăng ký HWID mới
     if (hwids.length < maxHwid) {
-        hwids.push(hwid);
-        await setKey(key, { ...keyData, hwids, hwid: undefined });
+        const result = await keysCollection.findOneAndUpdate(
+            { key, $expr: { $lt: [{ $size: { $ifNull: ["$hwids", []] } }, maxHwid] } },
+            { $addToSet: { hwids: hwid }, $unset: { hwid: "" } },
+            { returnDocument: 'after' }
+        );
+
+        if (!result.value) {
+            return sendSigned(res, 200, {
+                success: false,
+                message: `Device limit reached (${maxHwid}/${maxHwid} slots full). Please reset HWID via Discord or contact Owner.`,
+            });
+        }
+
         await db.collection("hwid_register_logs").insertOne({
             key,
             hwid,
             registeredAt: Date.now(),
             source: "api_verify",
         });
-        return res.status(200).json({
+
+        const newHwids = normalizeHwids(result.value);
+        return sendSigned(res, 200, {
             success: true,
-            message: `New device registered - Access granted (${hwids.length}/${maxHwid} slots used)`,
+            module_key: keyData.moduleKey || MODULE_DECRYPT_KEY,
+            message: `New device registered - Access granted (${newHwids.length}/${maxHwid} slots used)`,
         });
     }
 
-    return res.status(200).json({
+    return sendSigned(res, 200, {
         success: false,
         message: `Device limit reached (${maxHwid}/${maxHwid} slots full). Please reset HWID via Discord or contact Owner.`,
     });
 });
 
 app.post('/api/keys/redeem', authenticate, async (req, res) => {
-    const { key, userId } = req.body
-    if (!key || !userId) return res.status(400).json({ error: 'Missing key or userId' })
+    const { key, userId } = req.body;
+    if (!key || !userId) return res.status(400).json({ error: 'Missing key or userId' });
 
-    const keyData = await getKey(key)
-    if (!keyData) return res.status(404).json({ error: 'Key not found' })
-    if (!keyData.active) return res.status(403).json({ error: 'Key is blacklisted' })
-    if (keyData.userId) return res.status(400).json({ error: 'Key already redeemed' })
-    if (keyData.expiresAt && Date.now() > keyData.expiresAt) return res.status(400).json({ error: 'Key expired' })
+    const keyData = await getKey(key);
+    if (!keyData) return res.status(404).json({ error: 'Key not found' });
+    if (!keyData.active) return res.status(403).json({ error: 'Key is blacklisted' });
+    if (keyData.userId) return res.status(400).json({ error: 'Key already redeemed' });
+    if (keyData.expiresAt && Date.now() > keyData.expiresAt) return res.status(400).json({ error: 'Key expired' });
 
-    await setKey(key, { ...keyData, userId, redeemedAt: Date.now() })
+    await setKey(key, { ...keyData, userId, redeemedAt: Date.now() });
 
-    const user = await getUser(userId) || { userId, keys: [] }
-    user.keys = user.keys || []
-    if (!user.keys.includes(key)) user.keys.push(key)
-    await setUser(userId, user)
+    const user = await getUser(userId) || { userId, keys: [] };
+    user.keys = user.keys || [];
+    if (!user.keys.includes(key)) user.keys.push(key);
+    await setUser(userId, user);
 
-
-    let roleMsg = 'No role assigned'
+    let roleMsg = 'No role assigned';
     try {
-        const guild = client.guilds.cache.get(ALLOWED_GUILD_ID)
+        const guild = client.guilds.cache.get(ALLOWED_GUILD_ID);
         if (guild) {
-            const role = guild.roles.cache.find(r => r.name === 'Premium')
+            const role = guild.roles.cache.find(r => r.name === 'Lyra+');
             if (role) {
-                const member = await guild.members.fetch(userId)
-                await member.roles.add(role)
-                roleMsg = 'Premium role added'
+                const member = await guild.members.fetch(userId);
+                await member.roles.add(role);
+                roleMsg = 'Lyra+ role added';
             }
         }
     } catch { }
 
-    await db.collection('redeem_logs').insertOne({ userId, key, redeemedAt: Date.now(), source: 'web' })
+    await db.collection('redeem_logs').insertOne({ userId, key, redeemedAt: Date.now(), source: 'web' });
 
-    res.json({ ok: true, message: 'Key redeemed', role: roleMsg })
-})
+    res.json({ ok: true, message: 'Key redeemed', role: roleMsg });
+});
 
 async function start() {
     console.log("🔄 Starting bot...");
@@ -1866,6 +2219,16 @@ async function start() {
     if (!DISCORD_TOKEN) {
         console.error("❌ DISCORD_TOKEN is missing!");
         console.error("Please set DISCORD_TOKEN in environment variables");
+        process.exit(1);
+    }
+
+    if (!MODULE_DECRYPT_KEY) {
+        console.error("❌ MODULE_DECRYPT_KEY is missing in environment variables!");
+        process.exit(1);
+    }
+
+    if (!RESPONSE_SIGN_SECRET) {
+        console.error("❌ Missing RESPONSE_SIGN_SECRET env var (must match the Render bot)");
         process.exit(1);
     }
 
@@ -1901,13 +2264,12 @@ async function start() {
             console.error("❌ Failed to register slash commands:", err.message);
         }
 
-        // Initialize boost tracking
         try {
-            await boostTracking.initBoostTracking(client, ALLOWED_GUILD_ID, db, {
-                getAllKeys,
-                setKey,
-            }, BOOST_WEBHOOK_URL, generateKey);
-            console.log("✅ Boost tracking initialized");
+          //  await boostTracking.initBoostTracking(client, ALLOWED_GUILD_ID, db, {
+            //    getAllKeys,
+              //  setKey,
+           // }, BOOST_WEBHOOK_URL, generateKey);
+           // console.log("✅ Boost tracking initialized");
         } catch (err) {
             console.error("❌ Failed to initialize boost tracking:", err.message);
         }
@@ -1915,7 +2277,6 @@ async function start() {
         setInterval(() => {
             fetch(`http://localhost:${PORT}/api/health`).catch(() => { });
         }, 60 * 1000);
-
 
         setInterval(() => {
             const now = Date.now();
@@ -1928,32 +2289,26 @@ async function start() {
 
         console.log("✅ Bot ready! Keep-alive active (1 min intervals)");
 
-        // ══ AUTO REVOKE PREMIUM ROLE KHI KEY HẾT HẠN ══
         async function checkExpiredKeys() {
             try {
                 const guild = client.guilds.cache.get(ALLOWED_GUILD_ID);
                 if (!guild) return;
 
                 const now = Date.now();
-                // Lấy tất cả key đã hết hạn và còn active
                 const expiredKeys = await keysCollection.find({
                     active: true,
                     expiresAt: { $ne: null, $lt: now }
                 }).toArray();
 
                 for (const keyData of expiredKeys) {
-                    // Đánh dấu key đã hết hạn
                     await keysCollection.updateOne(
                         { key: keyData.key },
                         { $set: { active: false } }
                     );
 
-                    // Tìm user đã redeem key này
-                    // Key lưu userId (không phải redeemedBy)
                     const userId = keyData.userId || keyData.redeemedBy;
                     if (!userId) continue;
 
-                    // Kiểm tra user còn key active nào không
                     const stillActive = await keysCollection.findOne({
                         $or: [{ userId: userId }, { redeemedBy: userId }],
                         active: true,
@@ -1965,25 +2320,23 @@ async function start() {
                         ]
                     });
 
-                    // Nếu không còn key active nào → thu hồi role Premium
                     if (!stillActive) {
                         try {
                             const member = await guild.members.fetch(userId).catch(() => null);
                             if (!member) continue;
 
-                            const premiumRole = guild.roles.cache.find(r => r.name === "Premium");
+                            const premiumRole = guild.roles.cache.find(r => r.name === "Lyra+");
                             if (!premiumRole) continue;
 
                             if (member.roles.cache.has(premiumRole.id)) {
                                 await member.roles.remove(premiumRole);
-                                console.log(`🔴 Đã thu hồi role Premium của ${member.user.tag} (key hết hạn)`);
+                                console.log(`🔴 Đã thu hồi role Lyra+ của ${member.user.tag} (key hết hạn)`);
 
-                                // Gửi DM thông báo
                                 try {
                                     const dm = await member.createDM();
                                     await dm.send(
-                                        "⚠️ **Amethyst Hub** - Thông báo hết hạn\n\n" +
-                                        "Key của bạn đã hết hạn và role **Premium** đã bị thu hồi.\n" +
+                                        "⚠️ **LyraBot** - Thông báo hết hạn\n\n" +
+                                        "Key của bạn đã hết hạn và role **Lyra+** đã bị thu hồi.\n" +
                                         "Liên hệ admin để gia hạn!"
                                     );
                                 } catch (e) {}
@@ -2002,11 +2355,8 @@ async function start() {
             }
         }
 
-        // Chạy ngay khi bot khởi động
         checkExpiredKeys();
-        // Chạy mỗi 1 giờ
         setInterval(checkExpiredKeys, 60 * 60 * 1000);
-
     });
 
     client.on("error", (err) => {
@@ -2050,14 +2400,6 @@ async function start() {
         console.error("Error code:", err.code);
         console.error("Error name:", err.name);
         console.error("Stack:", err.stack);
-
-        if (err.code === "TokenInvalid") {
-            console.error("⚠️  TOKEN IS INVALID!");
-        } else if (err.code === "DisallowedIntents") {
-            console.error("⚠️  INTENTS ERROR!");
-        } else {
-            console.error("⚠️  UNKNOWN ERROR - Check Discord API status");
-        }
     }
 }
 
