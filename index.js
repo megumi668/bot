@@ -17,7 +17,12 @@ const express = require("express");
 const crypto = require("crypto");
 const { MongoClient } = require("mongodb");
 
-const boostTracking = require("./services/boostTracking");
+let boostTracking;
+try {
+    boostTracking = require("./services/boostTracking");
+} catch (e) {
+    console.warn("⚠️ boostTracking module not found, skipping");
+}
 
 const app = express();
 app.use(express.json());
@@ -2390,7 +2395,7 @@ async function start() {
             console.error("  3. WebSocket connection issues");
             console.error("");
             console.error("API will continue running, but bot features won't work.");
-        }, 60000);
+}, 120000);
 
         await client.login(DISCORD_TOKEN);
         clearTimeout(loginTimeout);
